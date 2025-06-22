@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+python-dotenv
+openai
+PyMuPDF
+thefuzz
+sentence_transformers
+torch
+torchaudio
+torchvision 
