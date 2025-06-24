@@ -8,3 +8,7 @@ sentence_transformers
 torch
 torchaudio
 torchvision 
+faiss-cpu
+numpy<2.0.0
+scikit-learn
+tqdm 

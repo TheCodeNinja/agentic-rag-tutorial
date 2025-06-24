@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
     ThemeProvider, Box, TextField, Button, Paper, Typography, AppBar, Toolbar, CircularProgress,
     Drawer, List, ListItem, ListItemButton, ListItemText, IconButton, Divider, ListItemIcon, Chip, Grow, CssBaseline,
-    Modal
+    Modal, Switch, FormControlLabel
 } from '@mui/material';
 import SendIcon from '@mui/icons-material/Send';
 import HistoryIcon from '@mui/icons-material/History';
@@ -16,6 +16,7 @@ import DeleteSweepIcon from '@mui/icons-material/DeleteSweep';
 import CloseIcon from '@mui/icons-material/Close';
 import ArrowBackIosNewIcon from '@mui/icons-material/ArrowBackIosNew';
 import ArrowForwardIosIcon from '@mui/icons-material/ArrowForwardIos';
+import PsychologyIcon from '@mui/icons-material/Psychology';
 import { v4 as uuidv4 } from 'uuid';
 import { formatDistanceToNow } from 'date-fns';
 import axios from 'axios';
@@ -58,7 +59,9 @@ interface RetrievedContext extends SourceInfo {
 interface ApiAskResponse {
     llm_answer: string;
     retrieved_context: RetrievedContext[];
-    sources: { question: string, source_document: string, page_num: number }[];
+    sources: { question: string, source_document: string, page_num: number, images?: string[] }[];
+    reasoning_process?: string;
+    unanswered_aspects?: string[];
 }
 
 // --- Main App Component ---
@@ -88,6 +91,8 @@ function App() {
         activeConversationId ? conversations[activeConversationId]?.messages || [] : [],
         [activeConversationId, conversations]
     );
+
+    const [useCot, setUseCot] = useState(false);
 
     // --- Data Fetching and State Synchronization ---
     const fetchDocuments = async () => {
@@ -275,7 +280,7 @@ function App() {
         const loadingBotMessage: Message = { 
             id: uuidv4(), 
             type: 'bot', 
-            text: 'I\'m searching the knowledge base for relevant information...', 
+            text: useCot ? 'I\'m planning my approach to answer your question...' : 'I\'m searching the knowledge base for relevant information...', 
             isLoading: false, 
             isStreaming: true 
         };
@@ -336,7 +341,8 @@ function App() {
         
         // Start loading full response with sources and images in parallel
         // This will significantly reduce the waiting time after streaming completes
-        const fullResponsePromise = axios.post<ApiAskResponse>(`${API_BASE_URL}/ask`, { query: userInput.text })
+        const endpoint = useCot ? `${API_BASE_URL}/ask/cot` : `${API_BASE_URL}/ask`;
+        const fullResponsePromise = axios.post<ApiAskResponse>(endpoint, { query: userInput.text })
             .catch(error => {
                 console.error('Error fetching full response:', error);
                 return null;
@@ -409,11 +415,13 @@ function App() {
                         const fullResponse = await fullResponsePromise;
                         
                         if (fullResponse) {
-                            const { sources } = fullResponse.data;
+                            const { sources, reasoning_process, unanswered_aspects } = fullResponse.data;
                             
                             // Log the data for debugging
                             console.log('=== FRONTEND PROCESSING ===');
                             console.log('LLM Sources:', sources);
+                            if (reasoning_process) console.log('Reasoning Process:', reasoning_process);
+                            if (unanswered_aspects) console.log('Unanswered Aspects:', unanswered_aspects);
                             
                             // Trust the LLM's source information
                             let sources_to_display: SourceInfo[] = [];
@@ -438,6 +446,16 @@ function App() {
                                 const prevConvo = prev[activeConversationId!];
                                 if (!prevConvo) return prev;
                                 
+                                // Prepare additional CoT information if available
+                                let additionalText = '';
+                                if (useCot && reasoning_process) {
+                                    additionalText = '\n\n**Reasoning Process:**\n' + reasoning_process;
+                                }
+                                if (useCot && unanswered_aspects && unanswered_aspects.length > 0) {
+                                    additionalText += '\n\n**Aspects I couldn\'t answer from the provided context:**\n- ' + 
+                                        unanswered_aspects.join('\n- ');
+                                }
+                                
                                 return {
                                     ...prev,
                                     [activeConversationId!]: {
@@ -447,6 +465,7 @@ function App() {
                                                 ? {
                                                     ...m,
                                                     isStreaming: false,
+                                                    text: fullText + additionalText,
                                                     sources: sources_to_display,
                                                     images: images_to_display,
                                                 }
@@ -473,7 +492,7 @@ function App() {
                             });
                         }
                     } catch (error) {
-                        console.error('Error fetching full response data:', error);
+                        console.error('Error processing full response:', error);
                         // Just mark streaming as complete if there was an error
                         setConversations(prev => {
                             const prevConvo = prev[activeConversationId!];
@@ -491,6 +510,7 @@ function App() {
                         });
                     }
                     
+                    setIsSending(false);
                     return;
                 }
                 
@@ -668,12 +688,38 @@ function App() {
                         >
                             <MenuIcon />
                         </IconButton>
-                        <Typography variant="h6" noWrap component="div" sx={{ flexGrow: 1 }}>{activeConversationId ? conversations[activeConversationId]?.title : ''}</Typography>
-                        <IconButton onClick={handleNewConversation} title="New Chat">
-                            <AddCommentIcon />
-                        </IconButton>
+                        <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
+                            {activeConversationId ? conversations[activeConversationId]?.title || 'Agentic RAG Assistant' : 'Agentic RAG Assistant'}
+                        </Typography>
+                        
+                        <FormControlLabel
+                            control={
+                                <Switch 
+                                    checked={useCot}
+                                    onChange={(e) => setUseCot(e.target.checked)}
+                                    color="primary"
+                                />
+                            }
+                            label={
+                                <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                                    <PsychologyIcon sx={{ mr: 0.5 }} />
+                                    <Typography variant="body2">Chain-of-Thought</Typography>
+                                </Box>
+                            }
+                            sx={{ mr: 2 }}
+                        />
+                        
+                        <Button
+                            variant="outlined"
+                            startIcon={<AddCommentIcon />}
+                            onClick={handleNewConversation}
+                            sx={{ ml: 1 }}
+                        >
+                            New Chat
+                        </Button>
+                        
                         {activeConversationId && conversations[activeConversationId]?.messages.length > 0 && (
-                            <IconButton onClick={handleClearMessages} title="Clear all messages in this chat">
+                            <IconButton onClick={handleClearMessages} title="Clear all messages in this chat" sx={{ ml: 1 }}>
                                 <DeleteSweepIcon />
                             </IconButton>
                         )}

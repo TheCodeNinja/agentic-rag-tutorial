@@ -37,20 +37,35 @@ CACHE_TTL = 300  # 5 minutes TTL for cache entries
 # Global variable to store pre-loaded QA blocks
 preloaded_qa_blocks = []
 is_system_warmed_up = False
+is_vector_db_initialized = False
 
 class Query(BaseModel):
     query: str
+
+class VectorDBConfig(BaseModel):
+    enabled: bool
 
 @app.on_event("startup")
 async def startup_event():
     """Pre-warm the system by loading models and parsing PDFs in a background thread"""
     def warmup_system():
-        global preloaded_qa_blocks, is_system_warmed_up
+        global preloaded_qa_blocks, is_system_warmed_up, is_vector_db_initialized
         print("🔥 Starting system warm-up...")
         
         # Initialize embedding model to load it into memory
         print("📊 Initializing embedding model...")
         rag_service.initialize_embedding_model()
+        
+        # Initialize vector database
+        try:
+            print("🔍 Initializing vector database...")
+            rag_service.initialize_vector_db()
+            is_vector_db_initialized = True
+            print("✅ Vector database initialized")
+        except Exception as e:
+            print(f"❌ Error initializing vector database: {str(e)}")
+            print("⚠️ Falling back to in-memory search")
+            rag_service.USE_VECTOR_DB = False
         
         # Pre-load PDFs and parse them into QA blocks
         print("📑 Pre-loading PDFs...")
@@ -96,6 +111,10 @@ def get_system_status():
         "is_warmed_up": is_system_warmed_up,
         "preloaded_qa_blocks_count": len(preloaded_qa_blocks),
         "cache_entries_count": len(context_blocks_cache),
+        "vector_db": {
+            "enabled": rag_service.USE_VECTOR_DB,
+            "initialized": is_vector_db_initialized
+        }
     }
 
 @app.post("/upload")
@@ -129,14 +148,113 @@ def delete_document(filename: str):
     
     os.remove(file_path)
     
+    # Get the IDs of QA blocks to be deleted
+    block_ids_to_delete = [block.id for block in preloaded_qa_blocks if block.source_document == filename]
+    
     # Remove QA blocks for the deleted file from preloaded_qa_blocks
     preloaded_qa_blocks = [block for block in preloaded_qa_blocks if block.source_document != filename]
     print(f"Removed QA blocks for deleted file {filename}. Remaining blocks: {len(preloaded_qa_blocks)}")
     
+    # Remove from vector database if enabled
+    if rag_service.USE_VECTOR_DB and is_vector_db_initialized:
+        try:
+            from .services.vector_db_service import VectorDBService
+            # Mark blocks as deleted in the vector database
+            for block_id in block_ids_to_delete:
+                VectorDBService.delete_by_id(rag_service.QA_BLOCKS_COLLECTION, block_id)
+            print(f"Marked {len(block_ids_to_delete)} blocks as deleted in vector database")
+        except Exception as e:
+            print(f"Error removing blocks from vector database: {str(e)}")
+    
     # Clear the context blocks cache as it may contain blocks from the deleted file
     context_blocks_cache.clear()
     
+    # Also clear the ID-to-block mapping
+    for block_id in block_ids_to_delete:
+        if block_id in rag_service.qa_blocks_by_id:
+            del rag_service.qa_blocks_by_id[block_id]
+    
     return {"message": f"Successfully deleted '{filename}'"}
+
+@app.get("/vector-db/status")
+def get_vector_db_status():
+    """Get the status of the vector database"""
+    if not is_vector_db_initialized:
+        return {"enabled": False, "initialized": False}
+    
+    try:
+        from .services.vector_db_service import VectorDBService
+        stats = VectorDBService.get_collection_stats(rag_service.QA_BLOCKS_COLLECTION)
+        return {
+            "enabled": rag_service.USE_VECTOR_DB,
+            "initialized": is_vector_db_initialized,
+            "collection": rag_service.QA_BLOCKS_COLLECTION,
+            "stats": stats
+        }
+    except Exception as e:
+        return {
+            "enabled": rag_service.USE_VECTOR_DB,
+            "initialized": is_vector_db_initialized,
+            "error": str(e)
+        }
+
+@app.post("/vector-db/config")
+def configure_vector_db(config: VectorDBConfig):
+    """Configure the vector database"""
+    global is_vector_db_initialized
+    
+    # Update the configuration
+    rag_service.USE_VECTOR_DB = config.enabled
+    
+    # If enabling and not initialized, try to initialize
+    if config.enabled and not is_vector_db_initialized:
+        try:
+            rag_service.initialize_vector_db()
+            is_vector_db_initialized = True
+            
+            # Index existing QA blocks
+            if preloaded_qa_blocks:
+                rag_service.index_qa_blocks(preloaded_qa_blocks)
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"Failed to initialize vector database: {str(e)}",
+                "enabled": rag_service.USE_VECTOR_DB,
+                "initialized": is_vector_db_initialized
+            }
+    
+    return {
+        "success": True,
+        "message": f"Vector database {'enabled' if config.enabled else 'disabled'}",
+        "enabled": rag_service.USE_VECTOR_DB,
+        "initialized": is_vector_db_initialized
+    }
+
+@app.post("/vector-db/rebuild")
+def rebuild_vector_db():
+    """Rebuild the vector database by reindexing all QA blocks"""
+    if not is_vector_db_initialized:
+        return {"success": False, "message": "Vector database not initialized"}
+    
+    try:
+        from .services.vector_db_service import VectorDBService
+        
+        # Rebuild the collection
+        VectorDBService.rebuild_collection(rag_service.QA_BLOCKS_COLLECTION)
+        
+        # Reindex all QA blocks
+        rag_service.index_qa_blocks(preloaded_qa_blocks)
+        
+        return {
+            "success": True,
+            "message": "Vector database rebuilt successfully",
+            "blocks_indexed": len(preloaded_qa_blocks)
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"Failed to rebuild vector database: {str(e)}"
+        }
 
 def get_context_blocks_for_query(query: str):
     """Helper function to get context blocks for a query, using cache when possible."""
@@ -233,3 +351,19 @@ def ask(query: Query):
                 source["images"] = []
 
     return agentic_response 
+
+@app.post("/ask/cot")
+def ask_with_chain_of_thought(query: Query):
+    """
+    Enhanced endpoint that uses chain-of-thought reasoning to plan information needs
+    before retrieval and answer synthesis.
+    """
+    all_qa_blocks, _ = get_context_blocks_for_query(query.query)
+    
+    if not all_qa_blocks:
+        return {"llm_answer": "Could not extract any processable Q&A content from the documents in the knowledge base.", "sources": []}
+
+    # Use the chain-of-thought reasoning approach
+    cot_response = rag_service.get_cot_agentic_answer(query.query, all_qa_blocks, top_n=3)
+    
+    return cot_response 
