@@ -5,10 +5,20 @@ import os
 import shutil
 from typing import List, Dict, Any, Optional
 from .services import rag_service
+from .services.database_service import get_database_service
+from .services.database_chat_service import get_database_chat_service
+from .services.data_analysis_service import get_analysis_service
 from fastapi.responses import StreamingResponse
 import time
 import asyncio
 import threading
+import json
+import logging
+import pandas as pd
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -45,6 +55,15 @@ class Query(BaseModel):
 class VectorDBConfig(BaseModel):
     enabled: bool
 
+# New models for database functionality
+class DatabaseQuery(BaseModel):
+    query: str
+
+class ChartRequest(BaseModel):
+    data: List[Dict[str, Any]]
+    chart_type: str
+    parameters: Optional[Dict[str, Any]] = {}
+
 @app.on_event("startup")
 async def startup_event():
     """Pre-warm the system by loading models and parsing PDFs in a background thread"""
@@ -66,6 +85,18 @@ async def startup_event():
             print(f"❌ Error initializing vector database: {str(e)}")
             print("⚠️ Falling back to in-memory search")
             rag_service.USE_VECTOR_DB = False
+        
+        # Initialize database services
+        try:
+            print("🗄️ Initializing database services...")
+            db_service = get_database_service()
+            db_status = db_service.test_connection()
+            if db_status["status"] == "connected":
+                print("✅ Database connection successful")
+            else:
+                print(f"⚠️ Database connection failed: {db_status.get('error', 'Unknown error')}")
+        except Exception as e:
+            print(f"⚠️ Database services initialization failed: {str(e)}")
         
         # Pre-load PDFs and parse them into QA blocks
         print("📑 Pre-loading PDFs...")
@@ -97,7 +128,7 @@ async def startup_event():
 
 @app.get("/")
 def read_root():
-    return {"message": "Welcome to the Agentic RAG API"}
+    return {"message": "Welcome to the Agentic RAG API with Database Chat"}
 
 @app.get("/documents", response_model=List[str])
 def get_documents():
@@ -107,7 +138,7 @@ def get_documents():
 @app.get("/system/status")
 def get_system_status():
     """Returns the current system status"""
-    return {
+    status = {
         "is_warmed_up": is_system_warmed_up,
         "preloaded_qa_blocks_count": len(preloaded_qa_blocks),
         "cache_entries_count": len(context_blocks_cache),
@@ -116,6 +147,16 @@ def get_system_status():
             "initialized": is_vector_db_initialized
         }
     }
+    
+    # Add database status
+    try:
+        db_service = get_database_service()
+        db_status = db_service.test_connection()
+        status["database"] = db_status
+    except Exception as e:
+        status["database"] = {"status": "error", "error": str(e)}
+    
+    return status
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
@@ -367,3 +408,120 @@ def ask_with_chain_of_thought(query: Query):
     cot_response = rag_service.get_cot_agentic_answer(query.query, all_qa_blocks, top_n=3)
     
     return cot_response 
+
+# New database endpoints
+@app.get("/database/status")
+def get_database_status():
+    """Get database connection status and basic information."""
+    try:
+        db_service = get_database_service()
+        return db_service.test_connection()
+    except Exception as e:
+        logger.error(f"Database status check failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/database/schema")
+def get_database_schema():
+    """Get database schema information."""
+    try:
+        db_service = get_database_service()
+        return db_service.get_database_schema()
+    except Exception as e:
+        logger.error(f"Failed to get database schema: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/database/tables/{table_name}/sample")
+def get_table_sample(table_name: str, limit: int = 5):
+    """Get sample data from a specific table."""
+    try:
+        db_service = get_database_service()
+        return db_service.get_sample_data(table_name, limit)
+    except Exception as e:
+        logger.error(f"Failed to get sample data from {table_name}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/database/tables/{table_name}/analyze")
+def analyze_table(table_name: str):
+    """Perform comprehensive analysis of a table."""
+    try:
+        db_service = get_database_service()
+        return db_service.analyze_table(table_name)
+    except Exception as e:
+        logger.error(f"Failed to analyze table {table_name}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/database/query")
+def execute_database_query(query_request: DatabaseQuery):
+    """Execute a natural language query against the database."""
+    try:
+        db_chat_service = get_database_chat_service()
+        return db_chat_service.process_natural_language_query(
+            query_request.query
+        )
+    except Exception as e:
+        logger.error(f"Database query failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/database/query/stream")
+async def execute_database_query_stream(query_request: DatabaseQuery):
+    """Execute a natural language query against the database with streaming response."""
+    try:
+        db_chat_service = get_database_chat_service()
+        
+        def generate_stream():
+            for chunk in db_chat_service.stream_database_chat(query_request.query):
+                yield f"data: {json.dumps(chunk)}\n\n"
+        
+        return StreamingResponse(
+            generate_stream(),
+            media_type="text/plain",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
+        )
+    except Exception as e:
+        logger.error(f"Streaming database query failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/database/chart")
+def generate_chart_from_data(chart_request: ChartRequest):
+    """Generate a chart from provided data."""
+    try:
+        analysis_service = get_analysis_service()
+        return analysis_service.generate_chart(
+            pd.DataFrame(chart_request.data), 
+            chart_request.chart_type, 
+            **chart_request.parameters
+        )
+    except Exception as e:
+        logger.error(f"Chart generation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/database/sql")
+def execute_raw_sql(query: Query):
+    """Execute raw SQL query (use with caution)."""
+    try:
+        db_service = get_database_service()
+        return db_service.execute_query(query.query)
+    except Exception as e:
+        logger.error(f"Raw SQL execution failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/database/conversation/history")
+def get_conversation_history():
+    """Get database chat conversation history."""
+    try:
+        db_chat_service = get_database_chat_service()
+        return {"history": db_chat_service.get_conversation_history()}
+    except Exception as e:
+        logger.error(f"Failed to get conversation history: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/database/conversation/history")
+def clear_conversation_history():
+    """Clear database chat conversation history."""
+    try:
+        db_chat_service = get_database_chat_service()
+        db_chat_service.clear_conversation_history()
+        return {"message": "Conversation history cleared"}
+    except Exception as e:
+        logger.error(f"Failed to clear conversation history: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) 

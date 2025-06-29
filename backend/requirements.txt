@@ -11,4 +11,11 @@ torchvision
 faiss-cpu
 numpy<2.0.0
 scikit-learn
-tqdm 
+tqdm
+psycopg2-binary
+pandas
+matplotlib
+seaborn
+plotly
+sqlalchemy
+langdetect 

@@ -17,6 +17,7 @@ import CloseIcon from '@mui/icons-material/Close';
 import ArrowBackIosNewIcon from '@mui/icons-material/ArrowBackIosNew';
 import ArrowForwardIosIcon from '@mui/icons-material/ArrowForwardIos';
 import PsychologyIcon from '@mui/icons-material/Psychology';
+import StorageIcon from '@mui/icons-material/Storage';
 import { v4 as uuidv4 } from 'uuid';
 import { formatDistanceToNow } from 'date-fns';
 import axios from 'axios';
@@ -25,6 +26,7 @@ import remarkGfm from 'remark-gfm';
 import { AnimatePresence, motion } from 'framer-motion';
 
 import theme from './theme';
+import DatabaseChat from './components/DatabaseChat';
 
 // --- Type Definitions ---
 interface SourceInfo {
@@ -93,6 +95,7 @@ function App() {
     );
 
     const [useCot, setUseCot] = useState(false);
+    const [currentMode, setCurrentMode] = useState<'rag' | 'database'>('rag');
 
     // --- Data Fetching and State Synchronization ---
     const fetchDocuments = async () => {
@@ -415,11 +418,12 @@ function App() {
                         const fullResponse = await fullResponsePromise;
                         
                         if (fullResponse) {
-                            const { sources, reasoning_process, unanswered_aspects } = fullResponse.data;
+                            const { sources, retrieved_context, reasoning_process, unanswered_aspects } = fullResponse.data;
                             
                             // Log the data for debugging
                             console.log('=== FRONTEND PROCESSING ===');
                             console.log('LLM Sources:', sources);
+                            console.log('Retrieved Context:', retrieved_context);
                             if (reasoning_process) console.log('Reasoning Process:', reasoning_process);
                             if (unanswered_aspects) console.log('Unanswered Aspects:', unanswered_aspects);
                             
@@ -431,10 +435,12 @@ function App() {
                                 // Use the LLM's source information directly
                                 sources_to_display = sources;
                                 console.log('Using LLM sources directly:', sources_to_display);
-                                
-                                // Get images from the LLM sources directly (now includes question-specific images)
-                                images_to_display = sources.flatMap(source => (source as any).images || []);
-                                console.log('Images from LLM sources:', images_to_display);
+                            }
+                            
+                            // Get images from retrieved_context (this contains the actual QA block images)
+                            if (retrieved_context && retrieved_context.length > 0) {
+                                images_to_display = retrieved_context.flatMap(context => context.images || []);
+                                console.log('Images from retrieved context:', images_to_display);
                             }
                             
                             console.log('Final sources to display (from LLM):', sources_to_display);
@@ -764,6 +770,63 @@ function App() {
                         </List>
                     </Box>
 
+                    {/* Mode Selection */}
+                    <Box sx={{ p: 2, borderBottom: '1px solid', borderColor: 'grey.800', flexShrink: 0 }}>
+                        <Typography variant="h6" sx={{ mb: 2, display: 'flex', alignItems: 'center' }}>
+                            Chat Mode
+                        </Typography>
+                        <List>
+                            <ListItem disablePadding sx={{ mb: 1 }}>
+                                <ListItemButton 
+                                    selected={currentMode === 'rag'}
+                                    onClick={() => setCurrentMode('rag')}
+                                    sx={{ 
+                                        borderRadius: 1,
+                                        '&.Mui-selected': { 
+                                            bgcolor: 'rgba(0, 255, 255, 0.1)', 
+                                            borderLeft: '3px solid', 
+                                            borderColor: 'primary.main' 
+                                        }
+                                    }}
+                                >
+                                    <ListItemIcon sx={{ minWidth: 32 }}>
+                                        <FolderIcon />
+                                    </ListItemIcon>
+                                    <ListItemText 
+                                        primary="Documents (RAG)" 
+                                        secondary="Chat with your PDF documents"
+                                        primaryTypographyProps={{ sx: { fontWeight: 'medium' } }}
+                                        secondaryTypographyProps={{ sx: { fontSize: '0.75rem' } }}
+                                    />
+                                </ListItemButton>
+                            </ListItem>
+                            <ListItem disablePadding>
+                                <ListItemButton 
+                                    selected={currentMode === 'database'}
+                                    onClick={() => setCurrentMode('database')}
+                                    sx={{ 
+                                        borderRadius: 1,
+                                        '&.Mui-selected': { 
+                                            bgcolor: 'rgba(0, 255, 255, 0.1)', 
+                                            borderLeft: '3px solid', 
+                                            borderColor: 'primary.main' 
+                                        }
+                                    }}
+                                >
+                                    <ListItemIcon sx={{ minWidth: 32 }}>
+                                        <StorageIcon />
+                                    </ListItemIcon>
+                                    <ListItemText 
+                                        primary="Database Chat" 
+                                        secondary="Query and analyze your database"
+                                        primaryTypographyProps={{ sx: { fontWeight: 'medium' } }}
+                                        secondaryTypographyProps={{ sx: { fontSize: '0.75rem' } }}
+                                    />
+                                </ListItemButton>
+                            </ListItem>
+                        </List>
+                    </Box>
+
                     <Box sx={{ p: 2, flexGrow: 1, overflowY: 'auto' }}>
                         <Typography variant="h6" sx={{ mb: 2, display: 'flex', alignItems: 'center' }}><HistoryIcon sx={{ mr: 1 }} /> Chat History</Typography>
                         <List>
@@ -820,108 +883,114 @@ function App() {
                     }}
                 >
                     <Toolbar /> {/* Spacer for the fixed AppBar */}
-                    <Box sx={{ flexGrow: 1, overflowY: 'auto', p: { xs: 1, sm: 2, md: 3 }, display: 'flex', flexDirection: 'column' }}>
-                        <Box sx={{ flexGrow: 1 }} /> 
-                        {activeMessages.map((msg) => (
-                            <Grow in={true} key={msg.id} timeout={500}>
-                                <Paper elevation={0} sx={{
-                                    p: 2, mt: 1, mb: 1, maxWidth: '85%',
-                                    alignSelf: msg.type === 'user' ? 'flex-end' : 'flex-start',
-                                    bgcolor: msg.type === 'user' ? 'rgba(0, 100, 255, 0.2)' : 'rgba(255, 255, 255, 0.08)',
-                                    borderRadius: msg.type === 'user' ? '20px 20px 5px 20px' : '20px 20px 20px 5px',
-                                    border: '1px solid', borderColor: msg.type === 'user' ? 'rgba(0, 150, 255, 0.7)' : 'rgba(255, 255, 255, 0.25)',
-                                }}>
-                                    <Box sx={{ display: 'flex', alignItems: 'flex-start' }}>
-                                        <Box sx={{
-                                            width: 32, height: 32, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                            bgcolor: 'grey.800', color: 'text.primary', mr: 1.5, fontSize: '0.8rem', fontWeight: 'bold', boxShadow: '0 0 5px rgba(0, 255, 255, 0.5)', flexShrink: 0
-                                        }}>{msg.type === 'user' ? 'U' : 'A'}</Box>
-                                        <Box sx={{ flex: 1, overflow: 'hidden', '& a': { color: 'primary.main' }, '& p': {margin: 0}, '& ul, & ol': {pl: 2.5, my: 1}, '& li': {mb: 0.5} }}>
-                                            {msg.isLoading ? <CircularProgress size={20} /> : <ReactMarkdown children={msg.text} remarkPlugins={[remarkGfm]} />}
-                                            {msg.isStreaming && !msg.isLoading && (
-                                                <Box component="span" className="streaming-cursor" />
-                                            )}
-                                            {msg.images && msg.images.length > 0 && (
-                                                <Box sx={{ mt: 2, display: 'flex', flexWrap: 'wrap', gap: 1 }}>
-                                                    {msg.images.map((img, i) => 
-                                                        <img 
-                                                            key={i} 
-                                                            src={img} 
-                                                            alt={`detail ${i + 1}`} 
-                                                            style={{ maxWidth: '150px', maxHeight: '150px', borderRadius: '4px', border: '1px solid #0ff', cursor: 'pointer' }}
-                                                            onClick={() => handleImageClick(msg.images || [], i)}
-                                                        />
+                    {currentMode === 'rag' ? (
+                        <>
+                            <Box sx={{ flexGrow: 1, overflowY: 'auto', p: { xs: 1, sm: 2, md: 3 }, display: 'flex', flexDirection: 'column' }}>
+                                <Box sx={{ flexGrow: 1 }} /> 
+                                {activeMessages.map((msg) => (
+                                    <Grow in={true} key={msg.id} timeout={500}>
+                                        <Paper elevation={0} sx={{
+                                            p: 2, mt: 1, mb: 1, maxWidth: '85%',
+                                            alignSelf: msg.type === 'user' ? 'flex-end' : 'flex-start',
+                                            bgcolor: msg.type === 'user' ? 'rgba(0, 100, 255, 0.2)' : 'rgba(255, 255, 255, 0.08)',
+                                            borderRadius: msg.type === 'user' ? '20px 20px 5px 20px' : '20px 20px 20px 5px',
+                                            border: '1px solid', borderColor: msg.type === 'user' ? 'rgba(0, 150, 255, 0.7)' : 'rgba(255, 255, 255, 0.25)',
+                                        }}>
+                                            <Box sx={{ display: 'flex', alignItems: 'flex-start' }}>
+                                                <Box sx={{
+                                                    width: 32, height: 32, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                                    bgcolor: 'grey.800', color: 'text.primary', mr: 1.5, fontSize: '0.8rem', fontWeight: 'bold', boxShadow: '0 0 5px rgba(0, 255, 255, 0.5)', flexShrink: 0
+                                                }}>{msg.type === 'user' ? 'U' : 'A'}</Box>
+                                                <Box sx={{ flex: 1, overflow: 'hidden', '& a': { color: 'primary.main' }, '& p': {margin: 0}, '& ul, & ol': {pl: 2.5, my: 1}, '& li': {mb: 0.5} }}>
+                                                    {msg.isLoading ? <CircularProgress size={20} /> : <ReactMarkdown children={msg.text} remarkPlugins={[remarkGfm]} />}
+                                                    {msg.isStreaming && !msg.isLoading && (
+                                                        <Box component="span" className="streaming-cursor" />
+                                                    )}
+                                                    {msg.images && msg.images.length > 0 && (
+                                                        <Box sx={{ mt: 2, display: 'flex', flexWrap: 'wrap', gap: 1 }}>
+                                                            {msg.images.map((img, i) => 
+                                                                <img 
+                                                                    key={i} 
+                                                                    src={img} 
+                                                                    alt={`detail ${i + 1}`} 
+                                                                    style={{ maxWidth: '150px', maxHeight: '150px', borderRadius: '4px', border: '1px solid #0ff', cursor: 'pointer' }}
+                                                                    onClick={() => handleImageClick(msg.images || [], i)}
+                                                                />
+                                                            )}
+                                                        </Box>
+                                                    )}
+                                                    {msg.sources && msg.sources.length > 0 && (
+                                                        <Box sx={{ mt: 1.5, display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+                                                            <Typography variant="caption" sx={{ color: 'grey.400', fontSize: '0.7rem' }}>Sources:</Typography>
+                                                            {msg.sources.map((source, i) => {
+                                                                // Defensive check for old data format (string) vs new format (SourceInfo object)
+                                                                const isNewFormat = typeof source === 'object' && source !== null && 'question' in source;
+                                                                let label = '';
+                                                                
+                                                                if (isNewFormat) {
+                                                                    // Extract question number/identifier (e.g., "Q5" from "Q5. What information can I see in HA Go?")
+                                                                    const questionMatch = source.question.match(/^(Q\d+)/i);
+                                                                    const questionId = questionMatch ? questionMatch[1] : `Q${i + 1}`;
+                                                                    label = `${questionId} from ${source.source_document} (Page ${source.page_num})`;
+                                                                } else {
+                                                                    label = String(source);
+                                                                }
+
+                                                                return (
+                                                                    <Chip 
+                                                                        key={i} 
+                                                                        icon={<InsertDriveFileIcon />} 
+                                                                        label={label}
+                                                                        size="small" 
+                                                                        sx={{ 
+                                                                            bgcolor: 'rgba(255, 255, 255, 0.05)', 
+                                                                            color: 'grey.400', 
+                                                                            fontSize: '0.75rem',
+                                                                            border: '1px solid rgba(255, 255, 255, 0.1)',
+                                                                            height: '24px',
+                                                                            '& .MuiChip-icon': { color: 'grey.500', fontSize: '1rem', ml: '6px' },
+                                                                            '&:hover': { bgcolor: 'rgba(255, 255, 255, 0.15)' }
+                                                                        }} 
+                                                                    />
+                                                                );
+                                                            })}
+                                                        </Box>
                                                     )}
                                                 </Box>
-                                            )}
-                                            {msg.sources && msg.sources.length > 0 && (
-                                                <Box sx={{ mt: 1.5, display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
-                                                    <Typography variant="caption" sx={{ color: 'grey.400', fontSize: '0.7rem' }}>Sources:</Typography>
-                                                    {msg.sources.map((source, i) => {
-                                                        // Defensive check for old data format (string) vs new format (SourceInfo object)
-                                                        const isNewFormat = typeof source === 'object' && source !== null && 'question' in source;
-                                                        let label = '';
-                                                        
-                                                        if (isNewFormat) {
-                                                            // Extract question number/identifier (e.g., "Q5" from "Q5. What information can I see in HA Go?")
-                                                            const questionMatch = source.question.match(/^(Q\d+)/i);
-                                                            const questionId = questionMatch ? questionMatch[1] : `Q${i + 1}`;
-                                                            label = `${questionId} from ${source.source_document} (Page ${source.page_num})`;
-                                                        } else {
-                                                            label = String(source);
-                                                        }
-
-                                                        return (
-                                                            <Chip 
-                                                                key={i} 
-                                                                icon={<InsertDriveFileIcon />} 
-                                                                label={label}
-                                                                size="small" 
-                                                                sx={{ 
-                                                                    bgcolor: 'rgba(255, 255, 255, 0.05)', 
-                                                                    color: 'grey.400', 
-                                                                    fontSize: '0.75rem',
-                                                                    border: '1px solid rgba(255, 255, 255, 0.1)',
-                                                                    height: '24px',
-                                                                    '& .MuiChip-icon': { color: 'grey.500', fontSize: '1rem', ml: '6px' },
-                                                                    '&:hover': { bgcolor: 'rgba(255, 255, 255, 0.15)' }
-                                                                }} 
-                                                            />
-                                                        );
-                                                    })}
-                                                </Box>
-                                            )}
-                                        </Box>
-                                    </Box>
+                                            </Box>
+                                        </Paper>
+                                    </Grow>
+                                ))}
+                                <div ref={messagesEndRef} />
+                            </Box>
+                            
+                            <Box sx={{ p: 2, borderTop: '1px solid', borderColor: 'grey.800', bgcolor: 'rgba(5, 8, 18, 0.7)', backdropFilter: 'blur(10px)' }}>
+                                <Paper component="form" onSubmit={(e) => { e.preventDefault(); handleSendMessage(); }} sx={{ 
+                                    p: '8px 12px', 
+                                    display: 'flex', 
+                                    alignItems: 'center', 
+                                    borderRadius: '16px', 
+                                    bgcolor: 'rgba(255, 255, 255, 0.1)',
+                                    border: '1px solid rgba(255, 255, 255, 0.2)',
+                                    boxShadow: '0px 2px 10px rgba(0,0,0,0.5)'
+                                }}>
+                                    <TextField
+                                        sx={{ ml: 1, flex: 1, '& .MuiInputBase-input::placeholder': { color: 'grey.400' } }}
+                                        placeholder="Ask the agent about your documents..."
+                                        fullWidth multiline maxRows={5}
+                                        value={input}
+                                        onChange={(e) => setInput(e.target.value)}
+                                        onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(); } }}
+                                        disabled={isUploading || isSending || !activeConversationId}
+                                        InputProps={{ disableUnderline: true }}
+                                    />
+                                    <IconButton type="submit" color="primary" disabled={isUploading || isSending || !input.trim() || !activeConversationId}><SendIcon /></IconButton>
                                 </Paper>
-                            </Grow>
-                        ))}
-                        <div ref={messagesEndRef} />
-                    </Box>
-                    
-                    <Box sx={{ p: 2, borderTop: '1px solid', borderColor: 'grey.800', bgcolor: 'rgba(5, 8, 18, 0.7)', backdropFilter: 'blur(10px)' }}>
-                        <Paper component="form" onSubmit={(e) => { e.preventDefault(); handleSendMessage(); }} sx={{ 
-                            p: '8px 12px', 
-                            display: 'flex', 
-                            alignItems: 'center', 
-                            borderRadius: '16px', 
-                            bgcolor: 'rgba(255, 255, 255, 0.1)',
-                            border: '1px solid rgba(255, 255, 255, 0.2)',
-                            boxShadow: '0px 2px 10px rgba(0,0,0,0.5)'
-                        }}>
-                            <TextField
-                                sx={{ ml: 1, flex: 1, '& .MuiInputBase-input::placeholder': { color: 'grey.400' } }}
-                                placeholder="Ask the agent about your documents..."
-                                fullWidth multiline maxRows={5}
-                                value={input}
-                                onChange={(e) => setInput(e.target.value)}
-                                onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(); } }}
-                                disabled={isUploading || isSending || !activeConversationId}
-                                InputProps={{ disableUnderline: true }}
-                            />
-                            <IconButton type="submit" color="primary" disabled={isUploading || isSending || !input.trim() || !activeConversationId}><SendIcon /></IconButton>
-                        </Paper>
-                    </Box>
+                            </Box>
+                        </>
+                    ) : (
+                        <DatabaseChat />
+                    )}
                 </Box>
             </Box>
             <AnimatePresence>
